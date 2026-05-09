@@ -1,0 +1,9 @@
+[submodule "MicServ1-SOC"]
+	path = MicServ1-SOC
+	url = https://github.com/nt189/MicServ1-SOC.git
+[submodule "fulfillment-service"]
+	path = fulfillment-service
+	url = https://github.com/AlexBernal01/fulfillment-service.git
+[submodule "checkoutService"]
+	path = checkoutService
+	url = https://github.com/Yaelp26/checkoutService.git
