@@ -7,3 +7,6 @@
 [submodule "checkoutService"]
 	path = checkoutService
 	url = https://github.com/Yaelp26/checkoutService.git
+[submodule "Payments---Service"]
+	path = Payments---Service
+	url = https://github.com/Tiagogoco/Payments---Service.git
