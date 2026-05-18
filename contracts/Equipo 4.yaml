@@ -1,0 +1,533 @@
+openapi: 3.0.3
+info:
+  title: Payments Service API
+  version: 1.0.0
+  description: >
+    Microservicio de Pagos para ShopScale. Procesa pagos internos (tarjeta y efectivo)
+    e integra proveedores externos (PayPal). Incluye idempotencia, autenticación JWT
+    y rate limiting.
+servers:
+  - url: http://localhost:3011
+    description: Desarrollo
+  - url: http://localhost:3000
+    description: Docker / Producción
+tags:
+  - name: Health
+    description: Estado del servicio
+  - name: Payments
+    description: Operaciones de procesamiento de pagos
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        Clave única por intento lógico de cobro. Si el cliente reintenta con la misma
+        clave, el servicio devuelve el pago original sin crear uno nuevo.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+      examples:
+        ok:
+          value: "idem_7f4b2c0a9d1e4c2b"
+
+  schemas:
+    PaymentMethodInternal:
+      type: string
+      description: Método de pago interno.
+      enum: [card, cash]
+      example: card
+
+    PaymentMethod:
+      type: string
+      description: Método de pago.
+      enum: [card, cash, paypal]
+      example: card
+
+    Currency:
+      type: string
+      description: Moneda ISO 4217 (3 letras).
+      example: MXN
+      minLength: 3
+      maxLength: 3
+
+    PaymentStatus:
+      type: string
+      description: Estado del pago.
+      enum: [created, approved, declined, failed]
+      example: approved
+
+    PaymentProvider:
+      type: string
+      description: Proveedor del pago.
+      enum: [internal, paypal]
+      example: internal
+
+    CreatePaymentRequest:
+      type: object
+      required: [orderId, amount, method, currency]
+      additionalProperties: false
+      properties:
+        orderId:
+          type: string
+          description: ID de la orden a cobrar (debe existir en el servicio de Órdenes).
+          minLength: 1
+          example: "ord_100200300"
+        amount:
+          type: number
+          format: float
+          description: Monto a cobrar (mayor a 0).
+          exclusiveMinimum: 0
+          example: 599.99
+        currency:
+          $ref: "#/components/schemas/Currency"
+        method:
+          $ref: "#/components/schemas/PaymentMethodInternal"
+        metadata:
+          type: object
+          description: Metadatos opcionales (no afectan la lógica).
+          additionalProperties: true
+      examples:
+        valid:
+          summary: Petición válida
+          value:
+            orderId: "ord_100200300"
+            amount: 599.99
+            currency: "MXN"
+            method: "card"
+            metadata:
+              checkoutId: "chk_abc123"
+
+    CreateExternalPaymentRequest:
+      type: object
+      required: [orderId, amount, method, currency, provider]
+      additionalProperties: false
+      properties:
+        orderId:
+          type: string
+          minLength: 1
+          example: "ord_100200300"
+        amount:
+          type: number
+          format: float
+          exclusiveMinimum: 0
+          example: 599.99
+        currency:
+          $ref: "#/components/schemas/Currency"
+        method:
+          type: string
+          description: Debe ser "paypal".
+          enum: [paypal]
+          example: paypal
+        provider:
+          type: string
+          description: Proveedor externo seleccionado.
+          enum: [paypal]
+          example: paypal
+        payer:
+          type: object
+          description: Datos opcionales del pagador.
+          additionalProperties: false
+          properties:
+            email:
+              type: string
+              format: email
+              example: "cliente@correo.com"
+      examples:
+        valid:
+          summary: Petición válida (PayPal)
+          value:
+            orderId: "ord_100200300"
+            amount: 599.99
+            currency: "MXN"
+            method: "paypal"
+            provider: "paypal"
+            payer:
+              email: "cliente@correo.com"
+
+    Payment:
+      type: object
+      required:
+        - id
+        - orderId
+        - amount
+        - currency
+        - method
+        - status
+        - provider
+        - idempotencyKey
+        - createdAt
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: MongoDB ObjectId del pago.
+          example: "664f1a2b3c4d5e6f7a8b9c0d"
+        orderId:
+          type: string
+          example: "ord_100200300"
+        amount:
+          type: number
+          format: float
+          example: 599.99
+        currency:
+          $ref: "#/components/schemas/Currency"
+        method:
+          $ref: "#/components/schemas/PaymentMethod"
+        status:
+          $ref: "#/components/schemas/PaymentStatus"
+        provider:
+          $ref: "#/components/schemas/PaymentProvider"
+        providerReference:
+          type: string
+          description: Referencia del proveedor externo (null para pagos internos).
+          nullable: true
+          example: "PAYPAL-1715256000000"
+        idempotencyKey:
+          type: string
+          example: "idem_7f4b2c0a9d1e4c2b"
+        message:
+          type: string
+          description: Mensaje descriptivo del resultado.
+          nullable: true
+          example: "Payment approved"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-05-09T12:00:00.000Z"
+
+    ErrorResponse:
+      type: object
+      required: [error, message]
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          example: "BadRequest"
+        message:
+          type: string
+          example: "amount must be greater than 0"
+
+  responses:
+    Unauthorized:
+      description: Token JWT ausente o inválido
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            missingToken:
+              value:
+                error: "Unauthorized"
+                message: "Missing or invalid Authorization header"
+            expiredToken:
+              value:
+                error: "Unauthorized"
+                message: "Invalid or expired token"
+
+    BadRequest:
+      description: Datos inválidos o header faltante
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            missingIdempotency:
+              value:
+                error: "BadRequest"
+                message: "Idempotency-Key header is required"
+            invalidMethod:
+              value:
+                error: "BadRequest"
+                message: "method is not allowed for internal payments"
+
+    UnprocessableEntity:
+      description: El body no cumple el esquema (campo inválido o extra)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            invalidAmount:
+              value:
+                error: "UnprocessableEntity"
+                message: "amount: Number must be greater than 0"
+            extraField:
+              value:
+                error: "UnprocessableEntity"
+                message: "Unrecognized key(s) in object: 'discount'"
+
+    NotFound:
+      description: Recurso no encontrado
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            orderNotFound:
+              value:
+                error: "NotFound"
+                message: "orderId does not exist"
+            paymentNotFound:
+              value:
+                error: "NotFound"
+                message: "paymentId does not exist"
+
+    TooManyRequests:
+      description: Rate limit superado
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            rateLimited:
+              value:
+                error: "TooManyRequests"
+                message: "Rate limit exceeded, try again later"
+
+    ServiceUnavailable:
+      description: Servicio de Órdenes no disponible o timeout (2s)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            timeout:
+              value:
+                error: "ServiceUnavailable"
+                message: "Orders service timed out"
+            unreachable:
+              value:
+                error: "ServiceUnavailable"
+                message: "Unable to reach Orders service"
+
+    InternalServerError:
+      description: Error inesperado en el servidor
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            unexpected:
+              value:
+                error: "InternalServerError"
+                message: "An unexpected error occurred"
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Verificar estado del servicio
+      description: >
+        Comprueba que el servicio y la conexión a MongoDB estén disponibles.
+        No requiere autenticación. Útil para health checks de infraestructura.
+      responses:
+        "200":
+          description: Servicio disponible
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+              examples:
+                ok:
+                  value:
+                    status: "ok"
+        "503":
+          description: Base de datos no disponible
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: unavailable
+              examples:
+                unavailable:
+                  value:
+                    status: "unavailable"
+
+  /api/payments:
+    post:
+      tags: [Payments]
+      summary: Crear pago interno (tarjeta o efectivo)
+      description: >
+        Valida la orden, el monto y el método. Si todo es correcto y la
+        Idempotency-Key es nueva, crea el pago con estado `approved` y publica
+        un evento `payment.created`. Si la clave ya existe, devuelve el pago
+        original sin duplicarlo.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePaymentRequest"
+            examples:
+              valid:
+                $ref: "#/components/schemas/CreatePaymentRequest/examples/valid"
+      responses:
+        "201":
+          description: Pago creado exitosamente
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+              examples:
+                created:
+                  value:
+                    id: "664f1a2b3c4d5e6f7a8b9c0d"
+                    orderId: "ord_100200300"
+                    amount: 599.99
+                    currency: "MXN"
+                    method: "card"
+                    status: "approved"
+                    provider: "internal"
+                    providerReference: null
+                    idempotencyKey: "idem_7f4b2c0a9d1e4c2b"
+                    message: "Payment approved"
+                    createdAt: "2026-05-09T12:00:00.000Z"
+        "200":
+          description: Pago duplicado (idempotencia) — se devuelve el pago original
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/payments/external:
+    post:
+      tags: [Payments]
+      summary: Crear pago externo (PayPal)
+      description: >
+        Valida la orden, el monto y que el método sea `paypal`. Simula la aprobación
+        del proveedor y genera una referencia `PAYPAL-{timestamp}`. Aplica la misma
+        lógica de idempotencia que el pago interno.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateExternalPaymentRequest"
+            examples:
+              valid:
+                $ref: "#/components/schemas/CreateExternalPaymentRequest/examples/valid"
+      responses:
+        "201":
+          description: Pago creado exitosamente
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+              examples:
+                created:
+                  value:
+                    id: "664f1a2b3c4d5e6f7a8b9c0e"
+                    orderId: "ord_100200300"
+                    amount: 599.99
+                    currency: "MXN"
+                    method: "paypal"
+                    status: "approved"
+                    provider: "paypal"
+                    providerReference: "PAYPAL-1715256000000"
+                    idempotencyKey: "idem_7f4b2c0a9d1e4c2b"
+                    message: "Approved by PayPal"
+                    createdAt: "2026-05-09T12:00:00.000Z"
+        "200":
+          description: Pago duplicado (idempotencia) — se devuelve el pago original
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/payments/{paymentId}:
+    get:
+      tags: [Payments]
+      summary: Consultar un pago por ID
+      description: Devuelve el detalle de un pago existente por su MongoDB ObjectId.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          description: MongoDB ObjectId del pago.
+          schema:
+            type: string
+          example: "664f1a2b3c4d5e6f7a8b9c0d"
+      responses:
+        "200":
+          description: Pago encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+              examples:
+                found:
+                  value:
+                    id: "664f1a2b3c4d5e6f7a8b9c0d"
+                    orderId: "ord_100200300"
+                    amount: 599.99
+                    currency: "MXN"
+                    method: "card"
+                    status: "approved"
+                    provider: "internal"
+                    providerReference: null
+                    idempotencyKey: "idem_7f4b2c0a9d1e4c2b"
+                    message: "Payment approved"
+                    createdAt: "2026-05-09T12:00:00.000Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"

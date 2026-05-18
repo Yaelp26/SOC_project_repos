@@ -1,0 +1,715 @@
+openapi: 3.0.3
+info:
+  title: Checkout Service API
+  version: 1.0.0
+  description: >
+    Manages the shopping cart and orchestrates the full purchase flow:
+    stock validation, payment request, order creation, and Saga-based compensation.
+    Part of the ShopScale microservices platform.
+  contact:
+    name: Team 3 — Checkout Service
+
+servers:
+  - url: https://api.example.com
+    description: Example server (replace with actual URL)
+
+tags:
+  - name: Cart
+    description: Shopping cart management
+  - name: Checkout
+    description: Checkout session and Saga orchestration
+  - name: Order
+    description: Order detail and history
+
+paths:
+
+  # ─────────────────────────────────────────────
+  # CART
+  # ─────────────────────────────────────────────
+
+  /api/cart:
+    post:
+      tags: [Cart]
+      summary: Create cart
+      description: >
+        If the request includes a valid Bearer token, the cart is associated with the
+        authenticated userId. Otherwise, a guestId and guestToken are generated.
+        Returns cartId (and guestToken if guest).
+      security:
+        - bearerAuth: []
+        - guestAuth: []
+      requestBody:
+        description: Optional. Initialize cart with metadata if needed.
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCartRequest"
+      responses:
+        "201":
+          description: Cart created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateCartResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/cart/{cartId}:
+    get:
+      tags: [Cart]
+      summary: Get cart detail
+      description: >
+        Validates that the cart exists and belongs to the userId,
+        or that the guestToken is valid. Returns items and subtotal.
+      security:
+        - bearerAuth: []
+        - guestAuth: []
+      parameters:
+        - $ref: "#/components/parameters/cartId"
+      responses:
+        "200":
+          description: Cart detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CartDetail"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          description: Forbidden — cart does not belong to caller or token is invalid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Cart not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/cart/{cartId}/item:
+    post:
+      tags: [Cart]
+      summary: Add item to cart
+      description: >
+        Requires authorization (user or guestToken).
+        Cart must exist and be ACTIVE. Product must exist. qty must be > 0.
+        Stock validation is soft (optional at this layer — enforced on checkout confirm).
+        Adds or merges the item and recalculates the subtotal.
+      security:
+        - bearerAuth: []
+        - guestAuth: []
+      parameters:
+        - $ref: "#/components/parameters/cartId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddCartItemRequest"
+      responses:
+        "200":
+          description: Item added/merged and subtotal recalculated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CartDetail"
+        "400":
+          description: Invalid input (e.g. qty <= 0)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Cart or product not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: Conflict (e.g. insufficient stock if soft validation is enabled)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/cart/{cartId}/item/{itemId}:
+    put:
+      tags: [Cart]
+      summary: Update item quantity
+      description: >
+        Requires authorization. Item must belong to the cart.
+        qty must be > 0 — if qty = 0 is sent, return 400 and instruct caller to use DELETE.
+        Updates qty and recalculates subtotal.
+      security:
+        - bearerAuth: []
+        - guestAuth: []
+      parameters:
+        - $ref: "#/components/parameters/cartId"
+        - $ref: "#/components/parameters/itemId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCartItemRequest"
+      responses:
+        "200":
+          description: Item updated and subtotal recalculated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CartDetail"
+        "400":
+          description: Invalid input (qty <= 0 or qty = 0)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Cart or item not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+    delete:
+      tags: [Cart]
+      summary: Remove item from cart
+      description: >
+        Requires authorization. Cart must belong to caller.
+        Removes the item and recalculates subtotal.
+      security:
+        - bearerAuth: []
+        - guestAuth: []
+      parameters:
+        - $ref: "#/components/parameters/cartId"
+        - $ref: "#/components/parameters/itemId"
+      responses:
+        "204":
+          description: Item removed successfully
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Cart or item not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ─────────────────────────────────────────────
+  # CHECKOUT
+  # ─────────────────────────────────────────────
+
+  /api/checkout:
+    post:
+      tags: [Checkout]
+      summary: Create checkout session
+      description: >
+        Requires authorization (user or guestToken).
+        Cart must exist, belong to caller, be non-empty and be ACTIVE.
+        Captures a snapshot of items/prices for this attempt.
+        Creates checkoutId and idempotencyKey.
+      security:
+        - bearerAuth: []
+        - guestAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCheckoutRequest"
+      responses:
+        "201":
+          description: Checkout session created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateCheckoutResponse"
+        "400":
+          description: Invalid input (e.g. empty cart)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Cart not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/checkout/{checkoutId}/confirm:
+    post:
+      tags: [Checkout]
+      summary: Confirm checkout — executes Saga
+      description: >
+        Requires idempotencyKey for safe retries.
+        Executes the Saga pattern in order:
+          1. Reserve / validate stock  →  Inventory Service
+          2. Request payment           →  Payments Service
+          3. Create order / request fulfillment → Fulfillment Service
+          4. Compensate (refund) if any step fails after payment.
+        Returns orderId and external references.
+      security:
+        - bearerAuth: []
+        - guestAuth: []
+      parameters:
+        - $ref: "#/components/parameters/checkoutId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmCheckoutRequest"
+      responses:
+        "200":
+          description: Checkout confirmed and order created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfirmCheckoutResponse"
+        "400":
+          description: Invalid input (e.g. missing idempotencyKey)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Checkout not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: Conflict — idempotency key already used, invalid state, insufficient stock, or payment failure
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "500":
+          description: Internal Saga error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/checkout/{checkoutId}:
+    get:
+      tags: [Checkout]
+      summary: Get checkout status
+      description: >
+        Requires authorization (user or guestToken).
+        Returns current Saga state.
+      security:
+        - bearerAuth: []
+        - guestAuth: []
+      parameters:
+        - $ref: "#/components/parameters/checkoutId"
+      responses:
+        "200":
+          description: Checkout status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckoutStatusResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Checkout not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ─────────────────────────────────────────────
+  # ORDER
+  # ─────────────────────────────────────────────
+
+  /api/order/{orderId}:
+    get:
+      tags: [Order]
+      summary: Get order detail
+      description: >
+        Registered user: order must belong to userId.
+        Guest: validate orderLookupToken header (if supported).
+        Returns purchase detail and basic status history.
+      security:
+        - bearerAuth: []
+        - guestAuth: []
+      parameters:
+        - $ref: "#/components/parameters/orderId"
+        - name: orderLookupToken
+          in: header
+          required: false
+          description: Optional guest lookup token.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Order detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderDetail"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          description: Forbidden — order does not belong to caller or token is invalid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Order not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT issued by the Identity Service (Team 1).
+    guestAuth:
+      type: apiKey
+      in: header
+      name: X-Guest-Token
+      description: Token generated by this service on cart creation for unauthenticated users.
+
+  parameters:
+    cartId:
+      name: cartId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Cart identifier
+    itemId:
+      name: itemId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Item identifier within the cart
+    checkoutId:
+      name: checkoutId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Checkout session identifier
+    orderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Order identifier
+
+  schemas:
+
+    CreateCartRequest:
+      type: object
+      additionalProperties: false
+      description: Optional body on cart creation.
+      properties:
+        metadata:
+          type: object
+          additionalProperties: true
+
+    CreateCartResponse:
+      type: object
+      required: [cartId]
+      properties:
+        cartId:
+          type: string
+          format: uuid
+        guestToken:
+          type: string
+          nullable: true
+          description: Present only when cart was created for a guest user.
+
+    CartStatus:
+      type: string
+      enum: [ACTIVE, CHECKED_OUT, ABANDONED]
+
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: number
+          format: double
+          example: 199.99
+          description: Monetary amount (e.g. 199.99).
+        currency:
+          type: string
+          example: MXN
+          description: ISO 4217 currency code.
+
+    CartItem:
+      type: object
+      required: [itemId, productId, qty, unitPrice, lineTotal]
+      properties:
+        itemId:
+          type: string
+          format: uuid
+        productId:
+          type: string
+          format: uuid
+          description: >
+            References Inventory Service product ID.
+            Type must match Inventory Service — confirm with Team 2.
+        qty:
+          type: integer
+          minimum: 1
+        unitPrice:
+          $ref: "#/components/schemas/Money"
+        lineTotal:
+          $ref: "#/components/schemas/Money"
+        nameSnapshot:
+          type: string
+          nullable: true
+          description: Product name at the time the item was added (snapshot).
+
+    CartDetail:
+      type: object
+      required: [cartId, status, items, subtotal]
+      properties:
+        cartId:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/CartStatus"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CartItem"
+        subtotal:
+          $ref: "#/components/schemas/Money"
+        updatedAt:
+          type: string
+          format: date-time
+
+    AddCartItemRequest:
+      type: object
+      required: [productId, qty]
+      additionalProperties: false
+      properties:
+        productId:
+          type: string
+          format: uuid
+        qty:
+          type: integer
+          minimum: 1
+
+    UpdateCartItemRequest:
+      type: object
+      required: [qty]
+      additionalProperties: false
+      properties:
+        qty:
+          type: integer
+          minimum: 1
+          description: Must be > 0. Send DELETE to remove the item entirely.
+
+    CreateCheckoutRequest:
+      type: object
+      required: [cartId]
+      additionalProperties: false
+      properties:
+        cartId:
+          type: string
+          format: uuid
+        shippingAddress:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: >
+            Shipping address (if applicable to this domain).
+            Structure to be agreed with Fulfillment Service (Team 5).
+
+    CreateCheckoutResponse:
+      type: object
+      required: [checkoutId, idempotencyKey, status]
+      properties:
+        checkoutId:
+          type: string
+          format: uuid
+        idempotencyKey:
+          type: string
+          description: Key required for the confirm call. Store and reuse on retry.
+        status:
+          $ref: "#/components/schemas/CheckoutStatus"
+
+    CheckoutStatus:
+      type: string
+      description: Current state of the checkout Saga.
+      enum:
+        - STARTED
+        - STOCK_OK
+        - STOCK_FAILED
+        - PAYMENT_AUTHORIZED
+        - PAYMENT_FAILED
+        - ORDER_CREATED
+        - FULFILLMENT_REQUESTED
+        - COMPLETED
+        - COMPENSATED
+        - FAILED
+
+    CheckoutStatusResponse:
+      type: object
+      required: [checkoutId, status]
+      properties:
+        checkoutId:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/CheckoutStatus"
+        lastEventAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ConfirmCheckoutRequest:
+      type: object
+      required: [idempotencyKey]
+      additionalProperties: false
+      properties:
+        idempotencyKey:
+          type: string
+          description: Must match the key returned by the create checkout call.
+
+    ConfirmCheckoutResponse:
+      type: object
+      required: [orderId]
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        paymentRef:
+          type: string
+          nullable: true
+          description: Reference returned by Payments Service (Team 4). Null if payment failed.
+        fulfillmentRef:
+          type: string
+          nullable: true
+          description: Reference returned by Fulfillment Service (Team 5). Null if not yet dispatched.
+
+    OrderStatus:
+      type: string
+      enum: [CREATED, PAID, FULFILLING, SHIPPED, CANCELLED, REFUNDED]
+
+    OrderDetail:
+      type: object
+      required: [orderId, status, items, subtotal]
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/OrderStatus"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CartItem"
+        subtotal:
+          $ref: "#/components/schemas/Money"
+        paymentRef:
+          type: string
+          nullable: true
+        fulfillmentRef:
+          type: string
+          nullable: true
+        history:
+          type: array
+          description: Basic status change history.
+          items:
+            $ref: "#/components/schemas/OrderHistoryEvent"
+
+    OrderHistoryEvent:
+      type: object
+      required: [status, at]
+      properties:
+        status:
+          $ref: "#/components/schemas/OrderStatus"
+        at:
+          type: string
+          format: date-time
+        note:
+          type: string
+          nullable: true
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: VALIDATION_ERROR
+        message:
+          type: string
+          example: qty must be > 0
+        details:
+          type: object
+          additionalProperties: true
+          nullable: true
