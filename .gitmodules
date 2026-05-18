@@ -10,3 +10,6 @@
 [submodule "Payments---Service"]
 	path = Payments---Service
 	url = https://github.com/Tiagogoco/Payments---Service.git
+[submodule "API_Inventario"]
+	path = API_Inventario
+	url = https://github.com/GamaGuzman/API_Inventario.git
